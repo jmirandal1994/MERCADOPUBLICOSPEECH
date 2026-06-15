@@ -2,7 +2,7 @@
 """
 Agente de Licitaciones - Speech Psychology SPA
 Monitor MercadoPublico + Análisis IA + Alertas WhatsApp
-Deploy: Railway (worker 24/7)
+v3 - Busca por estado=publicada sin filtro nombre (no requiere token)
 """
 
 import os
@@ -15,9 +15,6 @@ from datetime import datetime
 from twilio.rest import Client
 from pathlib import Path
 
-# ============================================================
-# CONFIGURACIÓN SPEECH PSYCHOLOGY SPA
-# ============================================================
 EMPRESA = {
     "razon_social": "SPEECH PSYCHOLOGY SPA",
     "rut": "78.254.509-4",
@@ -37,9 +34,6 @@ EMPRESA = {
     "inicio_actividades": "22-09-2025",
 }
 
-# ============================================================
-# CREDENCIALES — desde variables de entorno de Railway
-# ============================================================
 ANTHROPIC_API_KEY    = os.environ.get("ANTHROPIC_API_KEY", "")
 TWILIO_ACCOUNT_SID   = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN    = os.environ.get("TWILIO_AUTH_TOKEN", "")
@@ -48,24 +42,19 @@ WHATSAPP_DESTINO     = os.environ.get("WHATSAPP_DESTINO",     "whatsapp:+5697842
 TOKEN_MERCADOPUBLICO = os.environ.get("TOKEN_MERCADOPUBLICO", "")
 SCORE_MINIMO_ALERTA  = int(os.environ.get("SCORE_MINIMO", "60"))
 
-# ============================================================
-# KEYWORDS — búsqueda espaciada para evitar límite API 429
-# ============================================================
-API_MERCADOPUBLICO = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
-
-KEYWORDS_BUSQUEDA = [
-    "salud",
-    "enfermeria",
-    "kinesiologo",
-    "fonoaudiologo",
-    "TENS",
-    "auxiliar servicio",
-    "prestaciones salud",
-    "atencion primaria",
-    "medico",
-    "clinico",
+# Palabras clave para filtrar del listado completo (sin token)
+KEYWORDS_FILTRO = [
+    "salud", "médico", "medico", "clínico", "clinico",
+    "enfermería", "enfermeria", "kinesiólogo", "kinesiologo",
+    "fonoaudiólogo", "fonoaudiologo", "TENS", "tens",
+    "auxiliar", "prestacion", "prestación", "atención primaria",
+    "atencion primaria", "APS", "CESFAM", "cesfam", "hospital",
+    "rehabilitacion", "rehabilitación", "terapia", "psicólogo",
+    "psicologo", "dental", "odontología", "odontologia",
+    "urgencia", "ambulatorio", "domiciliario", "domiciliaria",
 ]
 
+API_BASE = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
 ARCHIVO_PROCESADAS = Path("/tmp/licitaciones_procesadas.json")
 
 
@@ -87,53 +76,65 @@ def guardar_procesada(codigo, datos):
         json.dump(procesadas, f, ensure_ascii=False, indent=2)
 
 
+def es_relevante(licitacion):
+    """Filtra localmente si la licitación es de salud."""
+    texto = " ".join([
+        licitacion.get("Nombre", ""),
+        licitacion.get("Descripcion", ""),
+        licitacion.get("Nombre Organismo", ""),
+        licitacion.get("CodigoExterno", ""),
+    ]).lower()
+    return any(kw.lower() in texto for kw in KEYWORDS_FILTRO)
+
+
 def obtener_licitaciones_salud():
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Consultando MercadoPublico...")
-    licitaciones = []
-    codigos_vistos = set()
 
-    for keyword in KEYWORDS_BUSQUEDA:
+    licitaciones_salud = []
+    codigos_vistos = set()
+    paginas = [1, 2, 3]  # Traer las primeras 3 páginas de resultados
+
+    for pagina in paginas:
         try:
-            params = {"nombre": keyword, "estado": "publicada"}
+            params = {"estado": "publicada", "pagina": pagina}
             if TOKEN_MERCADOPUBLICO:
                 params["ticket"] = TOKEN_MERCADOPUBLICO
 
-            resp = requests.get(API_MERCADOPUBLICO, params=params, timeout=15)
+            resp = requests.get(API_BASE, params=params, timeout=20)
+            print(f"  Página {pagina}: status {resp.status_code}")
 
             if resp.status_code == 200:
-                nuevas = resp.json().get("Listado", [])
-                print(f"  '{keyword}': {len(nuevas)} encontradas")
-                for lit in nuevas:
+                data = resp.json()
+                todas = data.get("Listado", [])
+                print(f"  Página {pagina}: {len(todas)} licitaciones totales")
+
+                relevantes = 0
+                for lit in todas:
                     codigo = lit.get("CodigoExterno", "")
-                    if codigo and codigo not in codigos_vistos:
+                    if codigo and codigo not in codigos_vistos and es_relevante(lit):
                         codigos_vistos.add(codigo)
-                        licitaciones.append(lit)
+                        licitaciones_salud.append(lit)
+                        relevantes += 1
+
+                print(f"  Página {pagina}: {relevantes} de salud encontradas")
+
+                # Si la página devuelve menos de 10, no hay más páginas
+                if len(todas) < 10:
+                    break
+
             elif resp.status_code == 429:
-                print(f"  '{keyword}': límite API alcanzado, esperando 30s...")
-                time.sleep(30)
-                # Reintentar una vez
-                resp2 = requests.get(API_MERCADOPUBLICO, params=params, timeout=15)
-                if resp2.status_code == 200:
-                    nuevas = resp2.json().get("Listado", [])
-                    print(f"  '{keyword}' (reintento): {len(nuevas)} encontradas")
-                    for lit in nuevas:
-                        codigo = lit.get("CodigoExterno", "")
-                        if codigo and codigo not in codigos_vistos:
-                            codigos_vistos.add(codigo)
-                            licitaciones.append(lit)
-            elif resp.status_code == 203:
-                print(f"  '{keyword}': sin resultados (203)")
+                print(f"  Límite API — esperando 60s...")
+                time.sleep(60)
             else:
-                print(f"  '{keyword}': Error {resp.status_code}")
+                print(f"  Error {resp.status_code} en página {pagina}")
 
         except Exception as e:
-            print(f"  Error '{keyword}': {e}")
+            print(f"  Error página {pagina}: {e}")
 
-        # Pausa de 8 segundos entre cada keyword para no saturar la API
-        time.sleep(8)
+        time.sleep(5)
 
-    print(f"  Total únicas: {len(licitaciones)}")
-    return licitaciones
+    print(f"  TOTAL licitaciones de salud: {len(licitaciones_salud)}")
+    return licitaciones_salud
 
 
 def analizar_con_ia(licitacion):
@@ -146,12 +147,12 @@ EMPRESA POSTULANTE:
 - Giro: {EMPRESA['giro']}
 - Tipo: {EMPRESA['tipo_empresa']} ({EMPRESA['segmento']})
 - Inicio actividades: {EMPRESA['inicio_actividades']}
-- Profesionales: Fonoaudiólogos, TENS, Kinesiólogos, Enfermeros, Auxiliares
+- Profesionales disponibles: Fonoaudiólogos, TENS, Kinesiólogos, Enfermeros, Auxiliares de servicio, Psicólogos
 
 LICITACIÓN:
 {json.dumps(licitacion, ensure_ascii=False, indent=2)[:2000]}
 
-Responde SOLO en JSON válido (sin texto extra):
+Responde SOLO en JSON válido (sin texto extra, sin markdown):
 {{
   "score": <0-100>,
   "conveniente": <true/false>,
@@ -164,7 +165,7 @@ Responde SOLO en JSON válido (sin texto extra):
   "recomendacion": "<Postular / Revisar / No postular>"
 }}
 
-Scoring: 80-100=Excelente, 60-79=Buena, 40-59=Con riesgos, 0-39=No alineada"""
+Scoring: 80-100=Excelente alineación, 60-79=Buena oportunidad, 40-59=Con riesgos, 0-39=No alineada"""
 
     try:
         msg = client.messages.create(
@@ -297,6 +298,7 @@ def main():
     print(f"RUT      : {EMPRESA['rut']}")
     print(f"WhatsApp : {WHATSAPP_DESTINO}")
     print(f"Score min: {SCORE_MINIMO_ALERTA}/100")
+    print(f"Modo     : Sin token (filtro local por keywords)")
     print("="*55)
 
     procesar_ciclo()

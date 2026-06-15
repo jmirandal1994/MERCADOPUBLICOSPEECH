@@ -38,7 +38,7 @@ EMPRESA = {
 }
 
 # ============================================================
-# CREDENCIALES — solo desde variables de entorno (NUNCA en código)
+# CREDENCIALES — desde variables de entorno de Railway
 # ============================================================
 ANTHROPIC_API_KEY    = os.environ.get("ANTHROPIC_API_KEY", "")
 TWILIO_ACCOUNT_SID   = os.environ.get("TWILIO_ACCOUNT_SID", "")
@@ -49,8 +49,23 @@ TOKEN_MERCADOPUBLICO = os.environ.get("TOKEN_MERCADOPUBLICO", "")
 SCORE_MINIMO_ALERTA  = int(os.environ.get("SCORE_MINIMO", "60"))
 
 # ============================================================
+# KEYWORDS — búsqueda espaciada para evitar límite API 429
+# ============================================================
 API_MERCADOPUBLICO = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
-KEYWORDS_BUSQUEDA  = ["salud", "médico", "clínico", "atención primaria", "APS", "CESFAM"]
+
+KEYWORDS_BUSQUEDA = [
+    "salud",
+    "enfermeria",
+    "kinesiologo",
+    "fonoaudiologo",
+    "TENS",
+    "auxiliar servicio",
+    "prestaciones salud",
+    "atencion primaria",
+    "medico",
+    "clinico",
+]
+
 ARCHIVO_PROCESADAS = Path("/tmp/licitaciones_procesadas.json")
 
 
@@ -82,7 +97,9 @@ def obtener_licitaciones_salud():
             params = {"nombre": keyword, "estado": "publicada"}
             if TOKEN_MERCADOPUBLICO:
                 params["ticket"] = TOKEN_MERCADOPUBLICO
+
             resp = requests.get(API_MERCADOPUBLICO, params=params, timeout=15)
+
             if resp.status_code == 200:
                 nuevas = resp.json().get("Listado", [])
                 print(f"  '{keyword}': {len(nuevas)} encontradas")
@@ -91,11 +108,29 @@ def obtener_licitaciones_salud():
                     if codigo and codigo not in codigos_vistos:
                         codigos_vistos.add(codigo)
                         licitaciones.append(lit)
+            elif resp.status_code == 429:
+                print(f"  '{keyword}': límite API alcanzado, esperando 30s...")
+                time.sleep(30)
+                # Reintentar una vez
+                resp2 = requests.get(API_MERCADOPUBLICO, params=params, timeout=15)
+                if resp2.status_code == 200:
+                    nuevas = resp2.json().get("Listado", [])
+                    print(f"  '{keyword}' (reintento): {len(nuevas)} encontradas")
+                    for lit in nuevas:
+                        codigo = lit.get("CodigoExterno", "")
+                        if codigo and codigo not in codigos_vistos:
+                            codigos_vistos.add(codigo)
+                            licitaciones.append(lit)
+            elif resp.status_code == 203:
+                print(f"  '{keyword}': sin resultados (203)")
             else:
-                print(f"  Error API {resp.status_code} para '{keyword}'")
+                print(f"  '{keyword}': Error {resp.status_code}")
+
         except Exception as e:
             print(f"  Error '{keyword}': {e}")
-        time.sleep(0.5)
+
+        # Pausa de 8 segundos entre cada keyword para no saturar la API
+        time.sleep(8)
 
     print(f"  Total únicas: {len(licitaciones)}")
     return licitaciones
@@ -111,6 +146,7 @@ EMPRESA POSTULANTE:
 - Giro: {EMPRESA['giro']}
 - Tipo: {EMPRESA['tipo_empresa']} ({EMPRESA['segmento']})
 - Inicio actividades: {EMPRESA['inicio_actividades']}
+- Profesionales: Fonoaudiólogos, TENS, Kinesiólogos, Enfermeros, Auxiliares
 
 LICITACIÓN:
 {json.dumps(licitacion, ensure_ascii=False, indent=2)[:2000]}
@@ -188,7 +224,11 @@ def enviar_whatsapp(licitacion, analisis):
 _Speech Psychology SPA · Agente Licitaciones_"""
 
     try:
-        msg = client.messages.create(from_=TWILIO_WHATSAPP_FROM, body=cuerpo, to=WHATSAPP_DESTINO)
+        msg = client.messages.create(
+            from_=TWILIO_WHATSAPP_FROM,
+            body=cuerpo,
+            to=WHATSAPP_DESTINO
+        )
         print(f"  WhatsApp enviado ✓ ({msg.sid[:20]}...)")
         return True
     except Exception as e:
@@ -219,7 +259,7 @@ def procesar_ciclo():
         if score >= SCORE_MINIMO_ALERTA:
             enviar_whatsapp(lit, analisis)
             alertas += 1
-        time.sleep(1)
+        time.sleep(2)
 
     print(f"\nResumen: {nuevas} nuevas · {alertas} alertas enviadas\n")
 
@@ -258,9 +298,12 @@ def main():
     print(f"WhatsApp : {WHATSAPP_DESTINO}")
     print(f"Score min: {SCORE_MINIMO_ALERTA}/100")
     print("="*55)
+
     procesar_ciclo()
+
     schedule.every(1).hours.do(procesar_ciclo)
     schedule.every().day.at("08:00").do(resumen_diario)
+
     print("Agente corriendo. Ciclo cada hora + resumen 8:00 AM.\n")
     while True:
         schedule.run_pending()

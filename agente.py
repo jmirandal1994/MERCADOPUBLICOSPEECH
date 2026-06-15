@@ -40,9 +40,9 @@ EMPRESA = {
 # ============================================================
 # CREDENCIALES — solo desde variables de entorno (NUNCA en código)
 # ============================================================
-ANTHROPIC_API_KEY    = os.environ["ANTHROPIC_API_KEY"]
-TWILIO_ACCOUNT_SID   = os.environ["TWILIO_ACCOUNT_SID"]
-TWILIO_AUTH_TOKEN    = os.environ["TWILIO_AUTH_TOKEN"]
+ANTHROPIC_API_KEY    = os.environ.get("ANTHROPIC_API_KEY", "")
+TWILIO_ACCOUNT_SID   = os.environ.get("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN    = os.environ.get("TWILIO_AUTH_TOKEN", "")
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
 WHATSAPP_DESTINO     = os.environ.get("WHATSAPP_DESTINO",     "whatsapp:+56978426971")
 TOKEN_MERCADOPUBLICO = os.environ.get("TOKEN_MERCADOPUBLICO", "")
